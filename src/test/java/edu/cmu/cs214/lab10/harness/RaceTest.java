@@ -1,5 +1,17 @@
 package edu.cmu.cs214.lab10.harness;
 
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+
+import edu.cmu.cs214.lab10.domain.Booking;
+import edu.cmu.cs214.lab10.domain.BookingStatus;
+import edu.cmu.cs214.lab10.domain.Room;
+import edu.cmu.cs214.lab10.service.BookingService;
+import edu.cmu.cs214.lab10.store.InMemoryBookingStore;
+import java.util.List;
+import org.junit.jupiter.api.Test;
+
 /**
  * Where your concurrency tests go.
  *
@@ -7,6 +19,55 @@ package edu.cmu.cs214.lab10.harness;
  * at, and what scenario to drive through it, is yours to work out.
  */
 class RaceTest {
+
+    private static final String WEAN = "WEH-5409";
+    private static final List<Room> ROOMS = List.of(
+            new Room(WEAN, "Wean 5409", 12),
+            new Room("GHC-4301", "Gates 4301", 30));
+
+    /**
+     * Milestone 1, ticket RES-4471: two customers book the same room and slot.
+     *
+     * <p>Aim: {@code hasOverlap}, call 1. PausingStore parks a call after it has
+     * answered, so customer A is held between its check (already "free") and its
+     * insert. B is started only after A is parked, so B's check is call 2 and
+     * runs through the gap. Oracle: the ticket's invariant, checked on the end
+     * state of the real store, never on the order of events.
+     */
+    @Test
+    void sameSlotBookedTwiceLeavesOneConfirmedBooking() throws InterruptedException {
+        InMemoryBookingStore real = new InMemoryBookingStore();
+        PausingStore gated = new PausingStore(real, "hasOverlap", 1);
+        BookingService service = new BookingService(gated, ROOMS);
+
+        Thread customerA = new Thread(() -> service.book(WEAN, 540, 600), "customer-A");
+        customerA.start();
+        assertTrue(gated.awaitPaused(),
+                "gate never fired: no hasOverlap call 1, so this run did not drive the interleaving");
+
+        Thread customerB = new Thread(() -> service.book(WEAN, 540, 600), "customer-B");
+        customerB.start();
+        customerB.join(PausingStore.TIMEOUT_MILLIS);
+
+        gated.release();
+        customerA.join(PausingStore.TIMEOUT_MILLIS);
+        customerB.join(PausingStore.TIMEOUT_MILLIS); // B may wait behind A once a fix serializes them
+
+        assertFalse(customerA.isAlive() || customerB.isAlive(),
+                "a customer was still booking, so the end state below would be incomplete");
+        assertEquals(1, confirmedCount(real, WEAN, 540, 600),
+                () -> "CONFIRMED bookings covering WEH-5409 540..600; store holds " + real.bookingsForRoom(WEAN));
+    }
+
+    private static int confirmedCount(InMemoryBookingStore store, String roomId, int startMinute, int endMinute) {
+        int count = 0;
+        for (Booking booking : store.bookingsForRoom(roomId)) {
+            if (booking.status() == BookingStatus.CONFIRMED && booking.overlaps(startMinute, endMinute)) {
+                count++;
+            }
+        }
+        return count;
+    }
 
     // ------------------------------------------------------------------
     // Wiring example 1: wrap the store

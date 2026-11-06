@@ -62,6 +62,50 @@ you missed. Leave the table as you first wrote it.
 that pair pins the schedule you predicted, and the output of two separate
 runs (assertion failure and log lines).
 
+Test: `RaceTest.sameSlotBookedTwiceLeavesOneConfirmedBooking`.
+
+**Aim: `hasOverlap`, call 1.** `PausingStore` parks a call *after* the store
+answers. Parking A's first `hasOverlap` therefore holds A between its check
+(already "free") and its `insert`, which is the gap in `BookingService.book`.
+
+- **Why call 1 is A's:** B starts only after `awaitPaused()` returns true. So B's check is call 2, and it passes straight through the gap.
+- **Why not `insert`, call 1:** that would park A *after* its write. B would then be rejected correctly, and the race would stay hidden.
+- **Guards against a false pass:** the test asserts that the gate fired and that both threads finished before it checks the end state.
+- **What it asserts:** exactly one CONFIRMED booking covering WEH-5409 `[540,600)` in the real store. It never asserts the order of events.
+
+Run 1 (`mvn -B test -Dtest=RaceTest`):
+
+```
+2026-11-06T03:11:17.743Z INFO booking.confirmed booking=bk-1 room=WEH-5409 start=540 end=600
+2026-11-06T03:11:17.751Z INFO booking.confirmed booking=bk-2 room=WEH-5409 start=540 end=600
+[ERROR] Tests run: 1, Failures: 1, Errors: 0, Skipped: 0, Time elapsed: 0.125 s <<< FAILURE! -- in edu.cmu.cs214.lab10.harness.RaceTest
+org.opentest4j.AssertionFailedError: CONFIRMED bookings covering WEH-5409 540..600; store holds [Booking[id=bk-1, roomId=WEH-5409, startMinute=540, endMinute=600, status=CONFIRMED], Booking[id=bk-2, roomId=WEH-5409, startMinute=540, endMinute=600, status=CONFIRMED]] ==> expected: <1> but was: <2>
+	at edu.cmu.cs214.lab10.harness.RaceTest.sameSlotBookedTwiceLeavesOneConfirmedBooking(RaceTest.java:58)
+[INFO] BUILD FAILURE
+```
+
+Run 2 (`mvn -B test -Dtest=RaceTest`):
+
+```
+2026-11-06T03:11:21.613Z INFO booking.confirmed booking=bk-1 room=WEH-5409 start=540 end=600
+2026-11-06T03:11:21.619Z INFO booking.confirmed booking=bk-2 room=WEH-5409 start=540 end=600
+[ERROR] Tests run: 1, Failures: 1, Errors: 0, Skipped: 0, Time elapsed: 0.108 s <<< FAILURE! -- in edu.cmu.cs214.lab10.harness.RaceTest
+org.opentest4j.AssertionFailedError: CONFIRMED bookings covering WEH-5409 540..600; store holds [Booking[id=bk-1, roomId=WEH-5409, startMinute=540, endMinute=600, status=CONFIRMED], Booking[id=bk-2, roomId=WEH-5409, startMinute=540, endMinute=600, status=CONFIRMED]] ==> expected: <1> but was: <2>
+	at edu.cmu.cs214.lab10.harness.RaceTest.sameSlotBookedTwiceLeavesOneConfirmedBooking(RaceTest.java:58)
+[INFO] BUILD FAILURE
+```
+
+**Prediction against what ran.** It matched. Both runs fail at line 58, the end-state
+assertion, which means the gate-fired and threads-finished checks above it passed. Each run
+shows two `booking.confirmed` lines for the same room and range, `bk-1` first, 6–8 ms apart,
+with nothing logged between them. That is the ticket's shape.
+
+One limit: the log does not name threads. That `bk-1` is B's booking is inferred from the
+code (`nextId()` runs after the check, while A is parked), not observed directly.
+
+Full suite at this commit: `Tests run: 12, Failures: 1`. Only this test fails; the 11
+original tests stay green. CI is expected to be red until milestone 3.
+
 ---
 
 ## Milestone 2: the patch a teammate sent
