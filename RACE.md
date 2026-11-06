@@ -130,11 +130,77 @@ cancel-in-gap     gateFired=true  promoted=bk-w      A=CONFIRMED(bk-1)  confirme
 
 **Your milestone-1 test on the patched code.** Green or red. Paste the result.
 
+**What the patch does.** It adds a second `store.hasOverlap(...)` (patched line 78), after
+`nextId()` and just before `store.insert(...)` (patched line 81). The check and the insert are
+still two separately locked store calls.
+
+**Result: green.** The gate fired, because the test's `awaitPaused()` assertion passed.
+- A is parked at call 1, its *first* check, before the re-check.
+- B checks, gets `bk-1`, re-checks, and inserts.
+- On release, A's re-check sees `bk-1` and rejects.
+
+```
+2026-11-06T03:22:50.186Z INFO booking.confirmed booking=bk-1 room=WEH-5409 start=540 end=600
+2026-11-06T03:22:50.201Z INFO booking.rejected room=WEH-5409 start=540 end=600 reason=slot already held
+[INFO] Tests run: 1, Failures: 0, Errors: 0, Skipped: 0
+[INFO] BUILD SUCCESS
+```
+
 **The re-aimed run.** Method name, call index, the pasted result, and one line
 on why that aim tests the patch rather than sidestepping it.
 
+Test: `RaceTest.sameSlotBookedTwiceAfterTheReCheckLeavesOneConfirmedBooking`.
+
+**Aim: `hasOverlap`, call 2.** A runs alone until it is parked, so calls 1 and 2 are A's first
+check and A's re-check. Parking call 2 holds A after the patch's own re-check, which is its
+freshest "free". B then books through exactly the window the patch says is closed. That makes
+this a test of the patch's last check rather than a way around it. The milestone 1 test and its
+oracle are unchanged. Result: **red on both runs**, at the end-state assertion (line 98), so
+the gate fired.
+
+```
+2026-11-06T03:28:03.090Z INFO booking.confirmed booking=bk-2 room=WEH-5409 start=540 end=600
+2026-11-06T03:28:03.098Z INFO booking.confirmed booking=bk-1 room=WEH-5409 start=540 end=600
+org.opentest4j.AssertionFailedError: CONFIRMED bookings covering WEH-5409 540..600; store holds [Booking[id=bk-2, roomId=WEH-5409, startMinute=540, endMinute=600, status=CONFIRMED], Booking[id=bk-1, roomId=WEH-5409, startMinute=540, endMinute=600, status=CONFIRMED]] ==> expected: <1> but was: <2>
+	at edu.cmu.cs214.lab10.harness.RaceTest.sameSlotBookedTwiceAfterTheReCheckLeavesOneConfirmedBooking(RaceTest.java:98)
+[ERROR] Tests run: 1, Failures: 1, Errors: 0, Skipped: 0
+```
+
+```
+2026-11-06T03:28:07.035Z INFO booking.confirmed booking=bk-2 room=WEH-5409 start=540 end=600
+2026-11-06T03:28:07.043Z INFO booking.confirmed booking=bk-1 room=WEH-5409 start=540 end=600
+org.opentest4j.AssertionFailedError: CONFIRMED bookings covering WEH-5409 540..600; store holds [Booking[id=bk-2, roomId=WEH-5409, startMinute=540, endMinute=600, status=CONFIRMED], Booking[id=bk-1, roomId=WEH-5409, startMinute=540, endMinute=600, status=CONFIRMED]] ==> expected: <1> but was: <2>
+	at edu.cmu.cs214.lab10.harness.RaceTest.sameSlotBookedTwiceAfterTheReCheckLeavesOneConfirmedBooking(RaceTest.java:98)
+[ERROR] Tests run: 1, Failures: 1, Errors: 0, Skipped: 0
+```
+
+The test was also red in two earlier whole-class runs (03:23:26Z and 03:23:30Z) before it was
+disabled.
+
+**Status in the repo:** `@Disabled`. The patch is rejected and not applied. On the shipped code
+a lone booking makes only one `hasOverlap` call, so this aim would never fire. To rerun it:
+
+```
+git apply proposed-fix.diff
+mvn -B test -Dtest='RaceTest#sameSlotBookedTwiceAfterTheReCheckLeavesOneConfirmedBooking' '-Djunit.jupiter.conditions.deactivate=org.junit.*DisabledCondition'
+git apply -R proposed-fix.diff
+```
+
 **Your verdict.** Accept or reject, and what your milestone-1 result does and
 does not show about the patch.
+
+**Reject.** The re-check repeats the check but does not make it atomic with the insert. The
+store's lock is still released between `hasOverlap` (line 78) and `insert` (line 81), so the
+check-then-act gap moved rather than closed. The deterministic red run above shows two
+CONFIRMED bookings for the same minutes.
+
+- **What the green milestone 1 result shows:** one schedule is now caught, a booking that lands between A's first check and its re-check.
+- **What it does not show:** that no schedule breaks the invariant. A green race test proves only the interleaving it pins.
+- **The teammate's evidence does not support the claim either:**
+  - The suite is single-threaded, so it cannot see a race.
+  - The stress runner says "narrowed, not fixed." It was run 5 times on the patch (1/100, 0/100, 1/100, 2/2000, 2/2000 bad rounds), against 21/100, 22/100, 20/100 and 63/2000 on the shipped code. These numbers are non-deterministic and supporting only.
+  - "A few runs, no bad rounds" is the same kind of evidence that failed to reproduce the ticket.
+- **Side effect the patch doesn't mention:** `nextId()` (line 73) now runs before the re-check, so an attempt the re-check rejects still uses up an id. In the green run above, A drew `bk-2` and was rejected. `bk-2` never appears in the log or the store, which fits. Ids no longer map to confirmed bookings one to one. That is harmless to the invariant, but it is an unannounced behavior change.
 
 ---
 

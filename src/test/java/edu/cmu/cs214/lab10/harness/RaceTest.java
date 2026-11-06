@@ -10,6 +10,7 @@ import edu.cmu.cs214.lab10.domain.Room;
 import edu.cmu.cs214.lab10.service.BookingService;
 import edu.cmu.cs214.lab10.store.InMemoryBookingStore;
 import java.util.List;
+import org.junit.jupiter.api.Disabled;
 import org.junit.jupiter.api.Test;
 
 /**
@@ -52,6 +53,45 @@ class RaceTest {
         gated.release();
         customerA.join(PausingStore.TIMEOUT_MILLIS);
         customerB.join(PausingStore.TIMEOUT_MILLIS); // B may wait behind A once a fix serializes them
+
+        assertFalse(customerA.isAlive() || customerB.isAlive(),
+                "a customer was still booking, so the end state below would be incomplete");
+        assertEquals(1, confirmedCount(real, WEAN, 540, 600),
+                () -> "CONFIRMED bookings covering WEH-5409 540..600; store holds " + real.bookingsForRoom(WEAN));
+    }
+
+    /**
+     * Milestone 2, re-aimed at the teammate's patch (proposed-fix.diff).
+     *
+     * <p>The patch adds a second {@code hasOverlap} right before {@code insert}.
+     * Aim: {@code hasOverlap}, call 2. A runs alone until it parks, so calls 1
+     * and 2 are A's first check and A's re-check. Parking the re-check holds A
+     * after its freshest "free" and before its insert, which is the gap the
+     * patch still leaves. Same oracle as milestone 1.
+     *
+     * <p>Disabled because the patch was rejected and is not applied: on the
+     * shipped code a lone booking makes only one hasOverlap call, so this aim
+     * never fires. To rerun it, see RACE.md, milestone 2.
+     */
+    @Disabled("aimed at proposed-fix.diff, which was rejected and is not applied; see RACE.md milestone 2")
+    @Test
+    void sameSlotBookedTwiceAfterTheReCheckLeavesOneConfirmedBooking() throws InterruptedException {
+        InMemoryBookingStore real = new InMemoryBookingStore();
+        PausingStore gated = new PausingStore(real, "hasOverlap", 2);
+        BookingService service = new BookingService(gated, ROOMS);
+
+        Thread customerA = new Thread(() -> service.book(WEAN, 540, 600), "customer-A");
+        customerA.start();
+        assertTrue(gated.awaitPaused(),
+                "gate never fired: no hasOverlap call 2, so this run did not drive the interleaving");
+
+        Thread customerB = new Thread(() -> service.book(WEAN, 540, 600), "customer-B");
+        customerB.start();
+        customerB.join(PausingStore.TIMEOUT_MILLIS);
+
+        gated.release();
+        customerA.join(PausingStore.TIMEOUT_MILLIS);
+        customerB.join(PausingStore.TIMEOUT_MILLIS);
 
         assertFalse(customerA.isAlive() || customerB.isAlive(),
                 "a customer was still booking, so the end state below would be incomplete");
