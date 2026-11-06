@@ -106,6 +106,24 @@ code (`nextId()` runs after the check, while A is parked), not observed directly
 Full suite at this commit: `Tests run: 12, Failures: 1`. Only this test fails; the 11
 original tests stay green. CI is expected to be red until milestone 3.
 
+**Follow-up checks (run after the commit above; the text above is left as written).**
+These used a throwaway test class with the same `PausingStore` wiring. It recorded
+each thread's `BookingResult` and was deleted after the run, so it is not in the repo.
+
+```
+aim=hasOverlap#1  gateFired=true  A=CONFIRMED(bk-2)  B=CONFIRMED(bk-1)  confirmedIn540..600=2
+aim=insert#1      gateFired=true  A=CONFIRMED(bk-1)  B=REJECTED         confirmedIn540..600=1
+cancel-in-gap     gateFired=true  promoted=bk-w      A=CONFIRMED(bk-1)  confirmedIn540..560=2
+```
+
+- **Thread ids:** the inference above holds. B gets `bk-1` and A gets `bk-2`, now seen directly from each thread's result.
+- **The `insert` aim:** parking `insert` call 1 hides the race. B is rejected and one booking is confirmed, as the aim rationale says.
+- **Suspect #6:** confirmed, no longer just reasoned. The setup puts `bk-y` CONFIRMED on `[480,540)` and `bk-w` WAITLISTED on `[500,560)` straight into the store.
+  - A calls `book(540, 600)` and is parked after `hasOverlap` returns false.
+  - `cancelBooking(bk-y)` promotes `bk-w`. Then A inserts.
+  - Result: `bk-w` and `bk-1` are both CONFIRMED over minutes 540–559.
+  - This is the same check-then-act gap as #1, crossed by a different second writer. A milestone 3 fix has to cover `cancelAndPromote` as well as concurrent `book()` calls.
+
 ---
 
 ## Milestone 2: the patch a teammate sent
