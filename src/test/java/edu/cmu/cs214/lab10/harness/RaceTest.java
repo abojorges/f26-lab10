@@ -99,6 +99,42 @@ class RaceTest {
                 () -> "CONFIRMED bookings covering WEH-5409 540..600; store holds " + real.bookingsForRoom(WEAN));
     }
 
+    /**
+     * Suspect #6 from milestone 1: a cancellation's promotion lands in book()'s gap.
+     *
+     * <p>Setup goes straight into the real store: bk-y CONFIRMED [480,540) and
+     * bk-w WAITLISTED [500,560). Aim: {@code hasOverlap}, call 1. Customer A,
+     * booking [540,600), is parked after its check said "free" (bk-y ends at 540).
+     * Cancelling bk-y then promotes bk-w into minutes 540..559, which A is about
+     * to take. Same oracle as milestone 1, on the contested minutes.
+     */
+    @Test
+    void promotionDuringTheBookingGapLeavesOneConfirmedBooking() throws InterruptedException {
+        InMemoryBookingStore real = new InMemoryBookingStore();
+        real.insert(new Booking("bk-y", WEAN, 480, 540, BookingStatus.CONFIRMED));
+        real.insert(new Booking("bk-w", WEAN, 500, 560, BookingStatus.WAITLISTED));
+        PausingStore gated = new PausingStore(real, "hasOverlap", 1);
+        BookingService service = new BookingService(gated, ROOMS);
+
+        Thread customerA = new Thread(() -> service.book(WEAN, 540, 600), "customer-A");
+        customerA.start();
+        assertTrue(gated.awaitPaused(),
+                "gate never fired: no hasOverlap call 1, so this run did not drive the interleaving");
+
+        Thread canceller = new Thread(() -> service.cancelBooking("bk-y"), "canceller");
+        canceller.start();
+        canceller.join(PausingStore.TIMEOUT_MILLIS);
+
+        gated.release();
+        customerA.join(PausingStore.TIMEOUT_MILLIS);
+        canceller.join(PausingStore.TIMEOUT_MILLIS);
+
+        assertFalse(customerA.isAlive() || canceller.isAlive(),
+                "a thread was still running, so the end state below would be incomplete");
+        assertEquals(1, confirmedCount(real, WEAN, 540, 560),
+                () -> "CONFIRMED bookings covering WEH-5409 540..560; store holds " + real.bookingsForRoom(WEAN));
+    }
+
     private static int confirmedCount(InMemoryBookingStore store, String roomId, int startMinute, int endMinute) {
         int count = 0;
         for (Booking booking : store.bookingsForRoom(roomId)) {
