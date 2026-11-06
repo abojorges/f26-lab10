@@ -178,12 +178,16 @@ The test was also red in two earlier whole-class runs (03:23:26Z and 03:23:30Z) 
 disabled.
 
 **Status in the repo:** `@Disabled`. The patch is rejected and not applied. On the shipped code
-a lone booking makes only one `hasOverlap` call, so this aim would never fire. To rerun it:
+a lone booking makes only one `hasOverlap` call, so this aim would never fire. To rerun it,
+start from this milestone's commit. The milestone 3 fix changed the lines the patch edits, so
+`git apply` refuses it on `main`. This sequence was checked from `5eb7b44`, and it is red as above:
 
 ```
+git switch --detach 5eb7b44
 git apply proposed-fix.diff
 mvn -B test -Dtest='RaceTest#sameSlotBookedTwiceAfterTheReCheckLeavesOneConfirmedBooking' '-Djunit.jupiter.conditions.deactivate=org.junit.*DisabledCondition'
 git apply -R proposed-fix.diff
+git switch main
 ```
 
 **Your verdict.** Accept or reject, and what your milestone-1 result does and
