@@ -29,6 +29,18 @@ public interface BookingStore {
     void insert(Booking booking);
 
     /**
+     * Stores the booking only if the room has no CONFIRMED booking touching its
+     * range, as one indivisible step: no other call can change the room between
+     * the check and the insert. Use this instead of {@link #hasOverlap} followed
+     * by {@link #insert} whenever the insert depends on the check.
+     *
+     * @param booking the booking to store; ids are assumed unique
+     * @return true when the booking was stored, false when a CONFIRMED booking
+     *     already intersects its range and nothing was stored
+     */
+    boolean insertIfFree(Booking booking);
+
+    /**
      * Every booking held for the room, in insertion order, in every status.
      *
      * @return a snapshot the caller owns; later writes to the store do not

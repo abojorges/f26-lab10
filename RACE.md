@@ -210,13 +210,151 @@ CONFIRMED bookings for the same minutes.
 and the two operations it now covers. Paste the diff of your change and the
 passing run of your milestone-1 test and the full suite.
 
+**Option 2: an atomic check-and-insert in the store.** The new method is
+`BookingStore.insertIfFree(Booking)`, a plain interface method. In
+`InMemoryBookingStore` it is `synchronized` on the store, so the overlap check and the
+`add` run under **one** hold of the store's lock. The two operations it covers are the
+overlap check (`hasOverlap`) and the insert (`insert`).
+
+`book()` keeps its `hasOverlap` pre-check as a quick way to reject a slot that is already
+taken, but the decision that counts is now `insertIfFree`. Why this option rather than
+`synchronized` or a `ReentrantLock` on the service:
+- **Same lock as `cancelAndPromote`:** the store's lock also guards `cancelAndPromote`, so a promotion can no longer land in the gap.
+- **Covers every service instance:** it covers every service that shares the store (web front end and kiosk). A service-level lock covers only one instance.
+
+Adding the method to the interface broke the build, as the handout predicted:
+
+```
+[ERROR] .../harness/PausingStore.java:[40,14] edu.cmu.cs214.lab10.harness.PausingStore is not abstract and does not override abstract method insertIfFree(edu.cmu.cs214.lab10.domain.Booking) in edu.cmu.cs214.lab10.store.BookingStore
+```
+
+`PausingStore` now passes the call through its `gate(...)`, so it can still be aimed at.
+
+```diff
+--- a/src/main/java/edu/cmu/cs214/lab10/store/BookingStore.java
++++ b/src/main/java/edu/cmu/cs214/lab10/store/BookingStore.java
++    /**
++     * Stores the booking only if the room has no CONFIRMED booking touching its
++     * range, as one indivisible step: no other call can change the room between
++     * the check and the insert. Use this instead of {@link #hasOverlap} followed
++     * by {@link #insert} whenever the insert depends on the check.
++     * ...
++     */
++    boolean insertIfFree(Booking booking);
+--- a/src/main/java/edu/cmu/cs214/lab10/store/InMemoryBookingStore.java
++++ b/src/main/java/edu/cmu/cs214/lab10/store/InMemoryBookingStore.java
++    @Override
++    public synchronized boolean insertIfFree(Booking booking) {
++        // Check and add under one hold of this store's lock, so no other call
++        // can confirm an overlapping booking in between.
++        if (hasOverlap(booking.roomId(), booking.startMinute(), booking.endMinute())) {
++            return false;
++        }
++        bookings.add(booking);
++        return true;
++    }
+--- a/src/main/java/edu/cmu/cs214/lab10/harness/PausingStore.java
++++ b/src/main/java/edu/cmu/cs214/lab10/harness/PausingStore.java
+-     *     name: {@code hasOverlap}, {@code insert}, {@code bookingsForRoom}, or
+-     *     {@code cancelAndPromote}
++     *     name: {@code hasOverlap}, {@code insert}, {@code insertIfFree},
++     *     {@code bookingsForRoom}, or {@code cancelAndPromote}
++    @Override
++    public boolean insertIfFree(Booking booking) {
++        return gate("insertIfFree", () -> delegate.insertIfFree(booking));
++    }
+--- a/src/main/java/edu/cmu/cs214/lab10/service/BookingService.java
++++ b/src/main/java/edu/cmu/cs214/lab10/service/BookingService.java
+- * through {@link BookingStore}, whose methods are each synchronized. Since the
+- * store is thread safe, the operations built on top of it are too. The only
+- * other field that changes after construction is {@link BookingStats}, and its
+- * numbers are documented as approximate.
++ * through {@link BookingStore}. Each store call is atomic on its own, but a
++ * sequence of calls is not, so a write that depends on a check is made in one
++ * store call ({@link BookingStore#insertIfFree}). The only other field that
++ * changes after construction is {@link BookingStats}, and its numbers are
++ * documented as approximate.
+         Booking booking = new Booking(nextId(), roomId, startMinute, endMinute, BookingStatus.CONFIRMED);
+-        store.insert(booking);
++        // The check above only turns away a slot that is already taken. It
++        // releases the store's lock before the write, so the decision that
++        // counts is made here, where the store checks and inserts in one step.
++        if (!store.insertIfFree(booking)) {
++            return reject(roomId, startMinute, endMinute, "slot already held");
++        }
+         stats.recordConfirmed();
+```
+
+Full suite, two runs (`mvn -B test`). The race test lines come first:
+
+```
+# run 1
+03:37:01.924Z INFO booking.cancelled booking=bk-y                                    <- cancellation test
+03:37:01.945Z INFO booking.promoted booking=bk-w room=WEH-5409 start=500 end=560
+03:37:01.956Z INFO booking.rejected room=WEH-5409 start=540 end=600 reason=slot already held
+03:37:01.967Z INFO booking.confirmed booking=bk-1 room=WEH-5409 start=540 end=600    <- milestone 1 test (B)
+03:37:01.967Z INFO booking.rejected room=WEH-5409 start=540 end=600 reason=slot already held   <- (A)
+[WARNING] Tests run: 3, Failures: 0, Errors: 0, Skipped: 1 -- in edu.cmu.cs214.lab10.harness.RaceTest
+[INFO] Tests run: 7, Failures: 0, Errors: 0, Skipped: 0 -- in edu.cmu.cs214.lab10.service.BookingServiceTest
+[INFO] Tests run: 4, Failures: 0, Errors: 0, Skipped: 0 -- in edu.cmu.cs214.lab10.domain.BookingTest
+[WARNING] Tests run: 14, Failures: 0, Errors: 0, Skipped: 1
+[INFO] BUILD SUCCESS
+
+# run 2
+03:37:06.563Z INFO booking.cancelled booking=bk-y
+03:37:06.584Z INFO booking.promoted booking=bk-w room=WEH-5409 start=500 end=560
+03:37:06.599Z INFO booking.rejected room=WEH-5409 start=540 end=600 reason=slot already held
+03:37:06.611Z INFO booking.confirmed booking=bk-1 room=WEH-5409 start=540 end=600
+03:37:06.611Z INFO booking.rejected room=WEH-5409 start=540 end=600 reason=slot already held
+[WARNING] Tests run: 14, Failures: 0, Errors: 0, Skipped: 1
+[INFO] BUILD SUCCESS
+```
+
+The one skip is the milestone 2 test, which stays `@Disabled` because it is aimed at the
+rejected patch.
+
+- **Test changes:** none to the milestone 1 test. Its method is byte-for-byte the same as in `251d6ec`. One test was added, `promotionDuringTheBookingGapLeavesOneConfirmedBooking`, for suspect #6. It was committed red on the shipped code (`0a32fb5`: expected 1, was 2 CONFIRMED over 540..560) and is green now.
+- **Stress runner, supporting evidence only:** 0/100, 0/100, 0/100, 0/2000 and 0/2000 bad rounds. Before the fix it was about 20/100.
+
 **Is your milestone-1 test still testing anything?** After your fix, describe
 what that test now exercises. Did `PausingStore` pause a call during the green run? How do
 you know?
+
+Yes. It drives the **same schedule** that was red: A is parked right after its
+`hasOverlap` (call 1) answered "free", and B books the same slot through that pause.
+
+What changed is what A does next. Its write is now `insertIfFree`, which re-checks under the
+same hold of the lock as the add. So A sees B's booking and is rejected: `bk-1` CONFIRMED
+(B), then `booking.rejected` (A), and one CONFIRMED booking in the end state.
+
+**The gate fired in both green runs.** The test's first assertion is
+`assertTrue(gated.awaitPaused(), ...)`, and the test passed. B also didn't wait (the class
+ran in 0.1 s, with no 2 s timeout), because `PausingStore` parks A *after* `hasOverlap` has
+returned, outside the store's lock.
+
+What the test cannot show: it cannot park A *inside* `insertIfFree`, between the check and
+the `add`. There is no store-call boundary there, which is the point of the fix. That part
+rests on the lock, not on a test.
 
 **What runs one at a time now that ran in parallel before.** Name concretely which callers
 queue behind which. "Nothing, it is just correct now" does not count as an
 answer.
 
+Before the fix, each store call ran alone, but other calls could run between A's
+`hasOverlap` and A's `insert`. Now `insertIfFree` holds the store's lock across the
+overlap scan **and** the add. Who now waits for the whole check-and-insert pair instead of
+slipping between its two halves:
+
+- **Another `book()` for the same slot**, from any `BookingService` on this store (web front end or kiosk). Its pre-check or `insertIfFree` waits, then sees the first booking and is rejected. This is the pair that caused RES-4471.
+- **`cancelBooking` → `cancelAndPromote`.** A promotion waits for an in-progress check-and-insert, or the insert waits for the promotion. Either way, the second one sees the first.
+- **Every other store caller, for every room:** `book()` for unrelated rooms, `listBookings` (`bookingsForRoom`), and `joinWaitlist` (`insert`). One list and one lock means they already ran one at a time per call. Now each of them can wait for a scan *plus* an add instead of one or the other.
+- **Extra cost:** every successful booking now takes the store's lock twice, once for the pre-check and once for `insertIfFree`. The longest hold is still one O(n) scan over all bookings, plus an add.
+
 **What you left unfixed.** For anything your review flagged that you chose not
 to fix, one line each on why.
+
+- **`BookingStats` lost updates (#2):** documented as approximate, nothing reads the counters, and exact counting is not worth contention on every booking.
+- **More than one process or replica:** the lock is per JVM, and the store is in memory per process. A shared database would need its own atomic enforcement, such as a constraint or a transaction with suitable isolation. Out of scope for this in-memory service.
+- **`hasOverlap` and `insert` are still public on `BookingStore`:** `joinWaitlist` needs `insert`, and removing `hasOverlap` is an API change beyond this fix. A future caller could rebuild the race. The `insertIfFree` javadoc says to use it whenever an insert depends on a check.
+- **An id is used up when a booking loses the race:** `nextId()` runs before `insertIfFree`, so the losing booking consumes an id. In the milestone 1 green run, A drew `bk-2` and was rejected. No contract promises contiguous ids, and the pre-check keeps this to real races, not every rejection.
+- **The milestone 2 test stays `@Disabled`:** it is aimed at the rejected patch. RACE.md milestone 2 has the command to rerun it.
